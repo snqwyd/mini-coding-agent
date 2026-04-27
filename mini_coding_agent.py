@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -222,6 +223,58 @@ class OllamaModelClient:
         return data.get("response", "")
 
 
+class DeepSeekModelClient:
+    """Client for the DeepSeek API (OpenAI-compatible chat completions)."""
+
+    DEFAULT_BASE_URL = "https://api.deepseek.com"
+    DEFAULT_MODEL = "deepseek-v4-pro"
+
+    def __init__(self, model, base_url, api_key, temperature, top_p, timeout):
+        self.model = model or self.DEFAULT_MODEL
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.temperature = temperature
+        self.top_p = top_p
+        self.timeout = timeout
+
+    def complete(self, prompt, max_new_tokens):
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_new_tokens,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "stream": False,
+        }
+        request = urllib.request.Request(
+            self.base_url + "/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"DeepSeek request failed with HTTP {exc.code}: {body}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(
+                "Could not reach DeepSeek API.\n"
+                "Make sure the base URL and API key are correct.\n"
+                f"Base URL: {self.base_url}\n"
+                f"Model: {self.model}"
+            ) from exc
+
+        try:
+            return data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError) as exc:
+            raise RuntimeError(f"Unexpected DeepSeek API response format: {data}") from exc
+
+
 class MiniAgent:
     def __init__(
         self,
@@ -365,8 +418,9 @@ class MiniAgent:
             "- Do not repeat the same tool call with the same arguments if it did not help. Choose a different tool or return a final answer.",
             "- Required tool arguments must not be empty. Do not call read_file, write_file, patch_file, run_shell, or delegate with args={}.",
         ])
+        backend_label = "Ollama" if isinstance(self.model_client, OllamaModelClient) else "DeepSeek"
         return "\n\n".join([
-            "You are Mini-Coding-Agent, a small local coding agent running through Ollama.",
+            f"You are Mini-Coding-Agent, a small local coding agent running through {backend_label}.",
             "Rules:\n" + rules,
             "Tools:\n" + tool_text,
             "Valid response examples:\n" + examples,
@@ -866,7 +920,7 @@ class MiniAgent:
         return "delegate_result:\n" + child.ask(task)
 
 
-def build_welcome(agent, model, host):
+def build_welcome(agent, model, backend, host=None):
     width = max(68, min(shutil.get_terminal_size((80, 20)).columns, 84))
     inner = width - 4
     gap = 3
@@ -902,23 +956,52 @@ def build_welcome(agent, model, host):
             row(""),
             row("WORKSPACE  " + middle(agent.workspace.cwd, inner - 11)),
             pair("MODEL", model, "BRANCH", agent.workspace.branch),
-            pair("APPROVAL", agent.approval_policy, "SESSION", agent.session["id"]),
+            pair("BACKEND", backend, "APPROVAL", agent.approval_policy),
+            pair("SESSION", agent.session["id"], "", ""),
             row(""),
         ]
     )
     return "\n".join([line, *rows, line])
 
 
-def build_agent(args):
-    workspace = WorkspaceContext.build(args.cwd)
-    store = SessionStore(Path(workspace.repo_root) / ".mini-coding-agent" / "sessions")
-    model = OllamaModelClient(
-        model=args.model,
+def _resolve_model(args):
+    if args.model:
+        return args.model
+    if args.backend == "ollama":
+        return "qwen3.5:4b"
+    return DeepSeekModelClient.DEFAULT_MODEL
+
+
+def _build_model_client(args):
+    model = _resolve_model(args)
+    if args.backend == "deepseek":
+        api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+        if not api_key:
+            raise RuntimeError(
+                "DeepSeek API key is required.\n"
+                "Set the DEEPSEEK_API_KEY environment variable."
+            )
+        return DeepSeekModelClient(
+            model=model,
+            base_url=args.deepseek_base_url,
+            api_key=api_key,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            timeout=args.deepseek_timeout,
+        )
+    return OllamaModelClient(
+        model=model,
         host=args.host,
         temperature=args.temperature,
         top_p=args.top_p,
         timeout=args.ollama_timeout,
     )
+
+
+def build_agent(args):
+    workspace = WorkspaceContext.build(args.cwd)
+    store = SessionStore(Path(workspace.repo_root) / ".mini-coding-agent" / "sessions")
+    model = _build_model_client(args)
     session_id = args.resume
     if session_id == "latest":
         session_id = store.latest()
@@ -945,13 +1028,25 @@ def build_agent(args):
 def build_arg_parser():
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-        description="Minimal coding agent for Ollama models.",
+        description="Minimal coding agent for Ollama and DeepSeek models.",
     )
     parser.add_argument("prompt", nargs="*", help="Optional one-shot prompt.")
     parser.add_argument("--cwd", default=".", help="Workspace directory.")
-    parser.add_argument("--model", default="qwen3.5:4b", help="Ollama model name.")
+    parser.add_argument(
+        "--backend",
+        choices=("ollama", "deepseek"),
+        default="deepseek",
+        help="LLM backend to use.",
+    )
+    parser.add_argument("--model", default=None, help="Model name (default depends on --backend).")
     parser.add_argument("--host", default="http://127.0.0.1:11434", help="Ollama server URL.")
     parser.add_argument("--ollama-timeout", type=int, default=300, help="Ollama request timeout in seconds.")
+    parser.add_argument(
+        "--deepseek-base-url",
+        default="https://api.deepseek.com",
+        help="DeepSeek API base URL.",
+    )
+    parser.add_argument("--deepseek-timeout", type=int, default=300, help="DeepSeek request timeout in seconds.")
     parser.add_argument("--resume", default=None, help="Session id to resume or 'latest'.")
     parser.add_argument(
         "--approval",
@@ -961,16 +1056,17 @@ def build_arg_parser():
     )
     parser.add_argument("--max-steps", type=int, default=6, help="Maximum tool/model iterations per request.")
     parser.add_argument("--max-new-tokens", type=int, default=512, help="Maximum model output tokens per step.")
-    parser.add_argument("--temperature", type=float, default=0.2, help="Sampling temperature sent to Ollama.")
-    parser.add_argument("--top-p", type=float, default=0.9, help="Top-p sampling value sent to Ollama.")
+    parser.add_argument("--temperature", type=float, default=0.2, help="Sampling temperature.")
+    parser.add_argument("--top-p", type=float, default=0.9, help="Top-p sampling value.")
     return parser
 
 
 def main(argv=None):
     args = build_arg_parser().parse_args(argv)
     agent = build_agent(args)
+    model = _resolve_model(args)
 
-    print(build_welcome(agent, model=args.model, host=args.host))
+    print(build_welcome(agent, model=model, backend=args.backend))
 
     if args.prompt:
         prompt = " ".join(args.prompt).strip()

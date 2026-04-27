@@ -15,7 +15,7 @@ It is a minimal local agent loop with:
 - transcript and memory persistence
 - bounded delegation
 
-The model backend is currently based on Ollama.
+The model backend supports **Ollama** and **DeepSeek V4**.
 
 <a href="https://magazine.sebastianraschka.com/p/components-of-a-coding-agent">
   <img src="https://substack-post-media.s3.amazonaws.com/public/images/49b97718-57f4-4977-99c8-8ad5c4d32af3_1548x862.png" width="500px">
@@ -54,8 +54,9 @@ This coding harness is organized around six practical building blocks:
 You need:
 
 - Python 3.10+
-- Ollama installed
-- an Ollama model pulled locally
+- Choose one of these backends:
+  - **Ollama**: installed locally with a model pulled (e.g., `qwen3.5:4b`)
+  - **DeepSeek API**: registered account with an API Key
 
 Optional:
 
@@ -64,7 +65,7 @@ Optional:
 This project has no Python runtime dependency beyond the standard library, so you can run it directly with `python mini_coding_agent.py` if you do not want to use `uv`.
 
 &nbsp;
-## Install Ollama
+## Install Ollama (if using Ollama backend)
 
 Install Ollama on your machine so the `ollama` command is available in your shell.
 
@@ -116,6 +117,8 @@ cd mini-coding-agent
 &nbsp;
 ## Basic Usage
 
+### With Ollama backend
+
 Start the agent:
 
 ```bash
@@ -134,6 +137,30 @@ By default it uses:
 
 - model: `qwen3.5:4b`
 - approval: `ask`
+
+### With DeepSeek backend
+
+```bash
+# Set the API key via environment variable
+export DEEPSEEK_API_KEY=sk-xxx
+
+uv run mini-coding-agent --backend deepseek
+```
+
+Or pass it as a command-line argument:
+
+```bash
+uv run mini-coding-agent --backend deepseek --deepseek-api-key sk-xxx
+```
+
+DeepSeek V4 offers two models:
+- `deepseek-v4-pro` (default, full capabilities)
+- `deepseek-v4-flash` (lighter and faster)
+
+Switch model:
+```bash
+uv run mini-coding-agent --backend deepseek --model deepseek-v4-flash
+```
 
 For a concrete usage example, see [EXAMPLE.md](EXAMPLE.md).
 
@@ -217,14 +244,22 @@ model connection, resume behavior, approval mode, and generation limits.
 
 Important flags:
 
+- `--backend`
+  selects the LLM backend: `ollama` (default) or `deepseek`
+- `--model`
+  selects the model name; default depends on backend (`qwen3.5:4b` for Ollama, `deepseek-v4-pro` for DeepSeek)
 - `--cwd`
   sets the workspace directory the agent should inspect and modify; default: `.`
-- `--model`
-  selects the Ollama model name, such as `qwen3.5:4b`; default: `qwen3.5:4b`
 - `--host`
   points the agent at the Ollama server URL (usually not needed); default: `http://127.0.0.1:11434`
 - `--ollama-timeout`
   controls how long the client waits for an Ollama response (usually not needed); default: `300` seconds
+- `--deepseek-api-key`
+  DeepSeek API key; alternatively set the `DEEPSEEK_API_KEY` environment variable
+- `--deepseek-base-url`
+  DeepSeek API base URL; default: `https://api.deepseek.com`
+- `--deepseek-timeout`
+  DeepSeek request timeout; default: `300` seconds
 - `--resume`
   resumes a saved session by id or uses `latest`; default: start a new session
 - `--approval`
@@ -239,14 +274,29 @@ Important flags:
   controls nucleus sampling for generation; default: `0.9`
 
 &nbsp;
-## Example
+## Built-in Tools
 
-See [EXAMPLE.md](EXAMPLE.md)
+| Tool | Risk | Description |
+|------|------|-------------|
+| `list_files` | Safe | List files in a directory |
+| `read_file` | Safe | Read a file by line range |
+| `search` | Safe | Full-text search (uses rg if available, else built-in) |
+| `delegate` | Safe | Delegate to a bounded read-only child agent |
+| `run_shell` | Approval required | Run a shell command |
+| `write_file` | Approval required | Write a text file |
+| `patch_file` | Approval required | Replace an exact text block in a file |
+
+&nbsp;
+## Output Format
+
+The agent expects the model to emit either `<tool>...</tool>` or `<final>...</final>`.
+
+- Different models will follow those instructions with different reliability.
+- If the model does not follow the format well, use a stronger instruction-following model.
 
 &nbsp;
 ## Notes & Tips
 
-- The agent expects the model to emit either `<tool>...</tool>` or `<final>...</final>`.
-- Different Ollama models will follow those instructions with different reliability.
-- If the model does not follow the format well, use a stronger instruction-following model.
 - The agent is intentionally small and optimized for readability, not robustness.
+- See [EXAMPLE.md](EXAMPLE.md) for a hands-on workflow example.
+- 中文版请查看 [README_CN.md](README_CN.md)。

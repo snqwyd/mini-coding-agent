@@ -3,6 +3,7 @@ import pytest
 from unittest.mock import patch
 
 from mini_coding_agent import (
+    DeepSeekModelClient,
     FakeModelClient,
     MiniAgent,
     OllamaModelClient,
@@ -239,7 +240,7 @@ def test_welcome_screen_keeps_box_shape_for_long_paths(tmp_path):
     deep.mkdir(parents=True)
     agent = build_agent(deep, [])
 
-    welcome = build_welcome(agent, model="qwen3.5:4b", host="http://127.0.0.1:11434")
+    welcome = build_welcome(agent, model="qwen3.5:4b", backend="ollama")
     lines = welcome.splitlines()
 
     assert len(lines) >= 5
@@ -397,3 +398,70 @@ def test_ollama_client_posts_expected_payload():
     assert captured["body"]["raw"] is False
     assert captured["body"]["think"] is False
     assert captured["body"]["options"]["num_predict"] == 42
+
+
+def test_deepseek_client_posts_expected_payload():
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps({
+                "choices": [{"message": {"content": "<final>ok</final>"}}],
+            }).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["timeout"] = timeout
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        captured["auth"] = request.get_header("Authorization")
+        return FakeResponse()
+
+    client = DeepSeekModelClient(
+        model="deepseek-chat",
+        base_url="https://api.deepseek.com",
+        api_key="sk-test123",
+        temperature=0.3,
+        top_p=0.95,
+        timeout=60,
+    )
+
+    with patch("urllib.request.urlopen", fake_urlopen):
+        result = client.complete("hello", 100)
+
+    assert result == "<final>ok</final>"
+    assert captured["url"] == "https://api.deepseek.com/chat/completions"
+    assert captured["timeout"] == 60
+    assert captured["auth"] == "Bearer sk-test123"
+    assert captured["body"]["model"] == "deepseek-chat"
+    assert captured["body"]["messages"] == [{"role": "user", "content": "hello"}]
+    assert captured["body"]["max_tokens"] == 100
+    assert captured["body"]["temperature"] == 0.3
+    assert captured["body"]["top_p"] == 0.95
+    assert captured["body"]["stream"] is False
+
+
+def test_deepseek_client_uses_default_model():
+    client = DeepSeekModelClient(
+        model=None,
+        base_url="https://api.deepseek.com",
+        api_key="sk-test",
+        temperature=0.2,
+        top_p=0.9,
+        timeout=300,
+    )
+    assert client.model == "deepseek-v4-pro"
+
+
+def test_deepseek_client_raises_on_missing_api_key(tmp_path):
+    from mini_coding_agent import build_arg_parser, build_agent
+
+    with patch.dict("os.environ", {}, clear=True):
+        args = build_arg_parser().parse_args(["--backend", "deepseek"])
+        with pytest.raises(RuntimeError, match="DeepSeek API key is required"):
+            build_agent(args)
